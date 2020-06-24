@@ -67,7 +67,8 @@ namespace Opm
     void cusparseSolverBackend::gpu_pbicgstab(WellContributions& wellContribs, BdaResult& res) {
         //added declaration of additional variables to keep time
         double t_total1, t_total2, t_wellContribs1, t_wellContribs2, t_matVecMult1, t_matVecMult2, t_triSolve1, t_triSolve2;
-        double t_wellContribs_total = 0.0;
+        double t_wellContribs_setCudaStream = 0.0;
+        double t_wellContribs_apply = 0.0;
         double t_matVecMult_total = 0.0;
         double t_triSolve_total = 0.0;
         int n = N;
@@ -92,7 +93,7 @@ namespace Opm
             wellContribs.setCudaStream(stream);
             // END TIME
             t_wellContribs2 = second();
-            t_wellContribs_total += t_wellcontribs2 - t_wellContribs1;
+            t_wellContribs_setCudaStream += t_wellContribs2 - t_wellContribs1;
         }
 
         cusparseDbsrmv(cusparseHandle, order, operation, Nb, Nb, nnzb, &one, descr_M, d_bVals, d_bRows, d_bCols, block_size, d_x, &zero, d_r);
@@ -154,7 +155,7 @@ namespace Opm
                 wellContribs.apply(d_pw, d_v);
                 // END TIME
                 t_wellContribs2 = second();
-                t_wellContribs_total += t_wellcontribs2 - t_wellContribs1;
+                t_wellContribs_apply += t_wellContribs2 - t_wellContribs1;
             }
 
             cublasDdot(cublasHandle, n, d_rw, 1, d_v, 1, &tmp1);
@@ -202,7 +203,7 @@ namespace Opm
                 wellContribs.apply(d_s, d_t);
                 // END TIME
                 t_wellContribs2 = second();
-                t_wellContribs_total += t_wellcontribs2 - t_wellContribs1;
+                t_wellContribs_apply += t_wellContribs2 - t_wellContribs1;
             }
 
             cublasDdot(cublasHandle, n, d_t, 1, d_r, 1, &tmp1);
@@ -240,11 +241,11 @@ namespace Opm
         // copy the times and number of iterations to the csv file
 
         // open file for APPENDING
-        std::ofstream myfile("/home/kenneth/work/rmine/opmTests/GPUTiming/gpu_linear_solve_time_details.csv", std::ios::app);
+        std::ofstream myfile("/home/kenneth/work/rmine/opmTests/GPUTiming/wellContributionsAnalysis.csv", std::ios::app);
         // append to file
-        myfile << it << "," << t_triSolve_total << "," << t_matVecMult_total << "," << t_wellContribs_total << "," << res.elapsed << "," << res.converged << "," << res.conv_rate <<"\n";
+        myfile << it << "," << t_triSolve_total << "," << t_matVecMult_total << "," << t_wellContribs_setCudaStream << "," << t_wellContribs_apply << "," << res.elapsed << "," << res.converged << "," << res.conv_rate <<"\n";
         myfile.close();
-        // it , sparse tri solver time , sparse matrix vector multiplication time, wellContributions , total
+        // it , sparse tri solver time , sparse matrix vector multiplication time, wellContributions.setCudaStream(), wellContributions.apply() , total
 
         if (verbosity > 0) {
             std::ostringstream out;

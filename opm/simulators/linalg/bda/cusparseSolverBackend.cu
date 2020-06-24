@@ -27,6 +27,8 @@
 #include <iostream>
 #include <sys/time.h>
 #include <sstream>
+//include statement to write to csv file
+#include <fstream>
 
 #include <opm/common/OpmLog/OpmLog.hpp>
 
@@ -63,7 +65,11 @@ namespace Opm
     }
 
     void cusparseSolverBackend::gpu_pbicgstab(WellContributions& wellContribs, BdaResult& res) {
-        double t_total1, t_total2;
+        //added declaration of additional variables to keep time
+        double t_total1, t_total2, t_wellContribs1, t_wellContribs2, t_matVecMult1, t_matVecMult2, t_triSolve1, t_triSolve2;
+        double t_wellContribs_total = 0.0;
+        double t_matVecMult_total = 0.0;
+        double t_triSolve_total = 0.0;
         int n = N;
         double rho = 1.0, rhop;
         double alpha, nalpha, beta;
@@ -76,8 +82,17 @@ namespace Opm
 
         t_total1 = second();
 
+        /* ----------------------------------------------------------------
+         * TIMES FOR INDIVIDUAL STEPS WITHIN THE LINEAR_SOLVE_TIME CUMULATIVE TIME
+         -----------------------------------------------------------------*/
+
         if(wellContribs.getNumWells() > 0){
+            // START TIME
+            t_wellContribs1 = second();
             wellContribs.setCudaStream(stream);
+            // END TIME
+            t_wellContribs2 = second();
+            t_wellContribs_total += t_wellcontribs2 - t_wellContribs1;
         }
 
         cusparseDbsrmv(cusparseHandle, order, operation, Nb, Nb, nnzb, &one, descr_M, d_bVals, d_bRows, d_bCols, block_size, d_x, &zero, d_r);
@@ -94,6 +109,7 @@ namespace Opm
             OpmLog::info(out.str());
         }
 
+        //loop where linear iterations occur
         for (it = 0.5; it < maxit; it+=0.5) {
             rhop = rho;
             cublasDdot(cublasHandle, n, d_rw, 1, d_r, 1, &rho);
@@ -106,6 +122,9 @@ namespace Opm
                 cublasDaxpy(cublasHandle, n, &one, d_r, 1, d_p, 1);
             }
 
+            // THIS IS THE SPARSE TRIANGULAR MATRIX SOLVE PORTION OF THE ITERATION
+            // START TIME
+            t_triSolve1 = second();
             // apply ilu0
             cusparseDbsrsv2_solve(cusparseHandle, order, \
                 operation, Nb, nnzb, &one, \
@@ -113,15 +132,29 @@ namespace Opm
             cusparseDbsrsv2_solve(cusparseHandle, order, \
                 operation, Nb, nnzb, &one, \
                 descr_U, d_mVals, d_mRows, d_mCols, block_size, info_U, d_t, d_pw, policy, d_buffer);
+            // END TIME
+            t_triSolve2 = second();
+            t_triSolve_total += t_triSolve2 - t_triSolve1;
 
+            // SPARE MATRIX VECTOR MULTIPLICATION PORTION OF ITERATION
+            // START TIME
+            t_matVecMult1 = second();
             // spmv
             cusparseDbsrmv(cusparseHandle, order, \
                 operation, Nb, Nb, nnzb, \
                 &one, descr_M, d_bVals, d_bRows, d_bCols, block_size, d_pw, &zero, d_v);
+            // END TIME
+            t_matVecMult2 = second();
+            t_matVecMult_total += t_matVecMult2 - t_matVecMult1;
 
             // apply wellContributions
             if(wellContribs.getNumWells() > 0){
+                // START TIME
+                t_wellContribs1 = second();
                 wellContribs.apply(d_pw, d_v);
+                // END TIME
+                t_wellContribs2 = second();
+                t_wellContribs_total += t_wellcontribs2 - t_wellContribs1;
             }
 
             cublasDdot(cublasHandle, n, d_rw, 1, d_v, 1, &tmp1);
@@ -137,6 +170,9 @@ namespace Opm
 
             it += 0.5;
 
+            // THIS IS THE SPARSE TRIANGULAR MATRIX SOLVE PORTION OF THE ITERATION (second time around)
+            // START TIME
+            t_triSolve1 = second();
             // apply ilu0
             cusparseDbsrsv2_solve(cusparseHandle, order, \
                 operation, Nb, nnzb, &one, \
@@ -144,15 +180,29 @@ namespace Opm
             cusparseDbsrsv2_solve(cusparseHandle, order, \
                 operation, Nb, nnzb, &one, \
                 descr_U, d_mVals, d_mRows, d_mCols, block_size, info_U, d_t, d_s, policy, d_buffer);
+            // END TIME
+            t_triSolve2 = second();
+            t_triSolve_total += t_triSolve2 - t_triSolve1;
 
+            // SPARE MATRIX VECTOR MULTIPLICATION PORTION OF ITERATION (second time around)
+            // START TIME
+            t_matVecMult1 = second();
             // spmv
             cusparseDbsrmv(cusparseHandle, order, \
                 operation, Nb, Nb, nnzb, &one, descr_M, \
                 d_bVals, d_bRows, d_bCols, block_size, d_s, &zero, d_t);
+            // END TIME
+            t_matVecMult2 = second();
+            t_matVecMult_total += t_matVecMult2 - t_matVecMult1;
 
             // apply wellContributions
             if(wellContribs.getNumWells() > 0){
+                // START TIME
+                t_wellContribs1 = second();
                 wellContribs.apply(d_s, d_t);
+                // END TIME
+                t_wellContribs2 = second();
+                t_wellContribs_total += t_wellcontribs2 - t_wellContribs1;
             }
 
             cublasDdot(cublasHandle, n, d_t, 1, d_r, 1, &tmp1);
@@ -184,10 +234,22 @@ namespace Opm
         res.elapsed = t_total2 - t_total1;
         res.converged = (it != (maxit + 0.5));
 
+        // TRANSFER TIMES FROM GPU TO CPU MEMORY (?)
+
+
+        // copy the times and number of iterations to the csv file
+
+        // open file for APPENDING
+        std::ofstream myfile("/home/kenneth/work/rmine/opmTests/GPUTiming/gpu_linear_solve_time_details.csv", std::ios::app);
+        // append to file
+        myfile << it << "," << t_triSolve_total << "," << t_matVecMult_total << "," << t_wellContribs_total << "," << res.elapsed << "," << res.converged << "," << res.conv_rate <<"\n";
+        myfile.close();
+        // it , sparse tri solver time , sparse matrix vector multiplication time, wellContributions , total
+
         if (verbosity > 0) {
             std::ostringstream out;
             out << "=== converged: " << res.converged << ", conv_rate: " << res.conv_rate << ", time: " << res.elapsed << \
-                   ", time per iteration: " << res.elapsed/it << ", iterations: " << it;
+                   ", time per iteration: " << res.elapsed/it << ", iterations TEST: " << it; // added "TEST" to check if code is updated
             OpmLog::info(out.str());
         }
     }
@@ -466,7 +528,7 @@ namespace Opm
             cudaStreamSynchronize(stream);
             t2 = second();
             std::ostringstream out;
-            out << "cusparseSolver::create_preconditioner(): " << t2-t1 << " s";
+            out << "cusparseSolver::create_preconditioner(): " << t2-t1 << " s" << "TESTING";
             OpmLog::info(out.str());
         }
         return true;
